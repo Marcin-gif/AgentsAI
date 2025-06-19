@@ -1,0 +1,15 @@
+streamlit
+langchain
+langchain-core
+langgraph
+langchain-ollama
+ollama
+pytesseract
+pillow
+pandas
+uuid
+asyncio
+python-dotenv
+chromadb
+openai
+tqdm

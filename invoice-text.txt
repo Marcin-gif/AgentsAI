@@ -1,0 +1,69 @@
+Extracted Text:
+Oto wyciągnięte dane z obrazu faktury:
+
+**Dane Sprzedawcy:**
+
+*   Nazwa: Firma ABC
+*   Adres: ul. Słowackiego 2
+*   Kod pocztowy: 11-455
+*   Miasto: Katowice
+*   NIP: 8731407921
+
+**Dane Kupującego:**
+
+*   Nazwa: Produkcja Sp. z o.o.
+*   Adres: ul. Nowogrodzka 5
+*   Kod pocztowy: 00-957
+*   Miasto: Warszawa
+*   NIP: 9372424178
+
+**Informacje o Fakturze:**
+
+*   Data wystawienia: 2019-08-28
+*   Data sprzedaży: 2019-08-28
+*   Numer faktury: FV 1/09/2019
+*   Sposób zapłaty: Przelew
+*   Termin zapłaty: 2019-10-05
+
+**Pozycje Faktury:**
+
+*   **LP 1:**
+    *   Nazwa towaru/usługi: Oprogramowanie
+    *   Rabaty: 20%
+    *   Ilość: 1 szt.
+    *   Cena netto: 16200.00
+    *   Cena netto po rabacie: 12960.00
+    *   Wartość netto: 12960.00
+    *   Stawka VAT: 23%
+    *   Wartość VAT: 2983.10
+    *   Wartość brutto: 15943.10
+*   **LP 2:**
+    *   Nazwa towaru/usługi: Dostawa
+    *   Rabaty: 0%
+    *   Ilość: 1 szt.
+    *   Cena netto: 10.00
+    *   Cena netto po rabacie: 10.00
+    *   Wartość netto: 10.00
+    *   Stawka VAT: 23%
+    *   Wartość VAT: 2.30
+    *   Wartość brutto: 12.30
+
+**Podsumowanie:**
+
+*   Wartość netto: 12970.00 PLN
+*   Stawka VAT: 23%
+*   Wartość VAT: 2983.10 PLN
+*   Wartość brutto: 15953.10 PLN
+
+**Dodatkowe informacje:**
+
+*   Zapłacono: 0.00 PLN
+*   Pozostało do zapłaty: 15953.10 PLN
+*   Słownie: pięćnaście tysięcy dziewięćset pięćdziesiąt trzy i 10/100 PLN
+*   Kwota do zapłaty: 15953.10 PLN
+*   Uwagi: proszę potwierdzić odbiór przesyłki
+*   Odbiorca: Handel S.C.
+
+
+
+Proszę dać znać, jeśli potrzebujesz więcej informacji.
