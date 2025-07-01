@@ -64,6 +64,25 @@ class AgentOCRState(TypedDict):
     validation_count: int
     dataFrame: DataFrame
     dataFrame_info: dict[str, Any]
+    is_Invoice: str
+    db_pozycje: dict[str, Any]
+    db_kupujacy: dict[str, Any]
+    db_sprzedawca: dict[str, Any]
+    db_odbiorca: dict[str, Any]
+    db_faktura: dict[str, Any]
+    db_podsumowanie: dict[str, Any]
+    db_kwoty: dict[str, Any]
+    user_response: dict
+    ask_to_save: bool
+    
+class AgentSQLState(TypedDict):
+    """AgentSQLState służy jako struktura do przechowywania informacji o stanie agenta SQL."""
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    question: HumanMessage
+    refined_question: HumanMessage
+    answer_sql: str
+    answer: str
+    
     
 class AgentRouterFiles(BaseModel):
     """route to check if question is about one file or multiple files."""
@@ -110,4 +129,10 @@ class ValidateJsonOutput(BaseModel):
     """Validate the JSON output from the agent."""
     valid: bool = Field(
         description="Odpowiedz 'true' jeśli JSON jest poprawny, w przeciwnym razie odpowiedz 'false'."
+    )
+    
+class CheckIsInvoice(BaseModel):
+    """Check if the question is about an invoice."""
+    invoice: Literal["tak","nie"] = Field(
+        description="Odpowiedz 'tak' jeśli pytanie dotyczy faktury, w przeciwnym razie odpowiedz 'nie'."
     )

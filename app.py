@@ -5,7 +5,8 @@ import uuid
 import asyncio
 from ChromaDbManager import ChromaDbManager
 import traceback
-
+from langgraph.types import Command, Interrupt
+from agent_OCR import graph_agent_ocr  # zakładamy, że masz agent_OCR zdefiniowany w tym module
 def streamlit_to_langchain(messages):
     result = []
     for msg in messages:
@@ -52,6 +53,7 @@ try:
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
+
 st.title("Chatbot")
 
 if 'messages' not in st.session_state:
@@ -70,18 +72,27 @@ if st.sidebar.button("Clear Chat History"):
     st.session_state.messages = []
     st.rerun()
 
-file_uploader = st.sidebar.file_uploader("Upload a file", type=["pdf", "txt", "docx"])
-
+file_uploader = st.sidebar.file_uploader("Upload a file", type=["pdf", "txt", "docx","png","jpg","jpeg"])
+use_agent_ocr = ""
 if file_uploader:
     file_details = {"filename": file_uploader.name,
                     "filetype": file_uploader.type,
                     "filesize": file_uploader.size}
     st.sidebar.write(file_details)
-    with open(file_uploader.name, "wb") as f:
-        f.write(file_uploader.getbuffer())
-    st.sidebar.success("File uploaded successfully!")
-    chromaDbManager = ChromaDbManager()
-    chromaDbManager.save_to_chromadb_async(file_uploader.name)
+    if file_details.get("filetype") in ["image/png", "image/jpeg"]:
+        st.sidebar.warning("Image files will be processed using OCR. Please ensure the image is clear for better results.")
+        with open(file_uploader.name,"wb") as f:
+            f.write(file_uploader.getbuffer())
+        st.sidebar.success("Image file uploaded successfully!")
+        use_agent_ocr = "y"
+    else:
+        with open(file_uploader.name, "wb") as f:
+            f.write(file_uploader.getbuffer())
+        st.sidebar.success("File uploaded successfully!")
+        chromaDbManager = ChromaDbManager()
+        chromaDbManager.save_to_chromadb_async(file_uploader.name)
+        
+print(use_agent_ocr)  
 
 # Update the UI with previous messages
 for message in st.session_state['messages']:
@@ -110,20 +121,34 @@ if prompt := st.chat_input("Ask a question:"):
             print("messages from app.py: ", messages)
             
             # Get response from LangGraph
-            response = graph_agent_supervisor.invoke(
+            if use_agent_ocr == "y":
+                # If OCR is used, we need to pass the file name
+                response = graph_agent_ocr.invoke(
                 {
-                    "question": HumanMessage(content=prompt),
-                    "messages": messages,
+                    "image_path": file_uploader.name,
+                    "refined_question": HumanMessage(content=prompt),
+                    "messages": messages
                 },
-                config={
-                    "configurable": {"thread_id": st.session_state.thread_id}
-                })
+                    config={"configurable": {"thread_id": st.session_state.thread_id}}
+                )
+            else:
+                response = graph_agent_supervisor.invoke(
+                    {
+                        "question": HumanMessage(content=prompt),
+                        "messages": messages,
+                    },
+                    config={
+                        "configurable": {"thread_id": st.session_state.thread_id}
+                    })
             
             print("response from app.py: ", response)
             
             # Process the answer safely
             raw_content = response.get("answer", "")
             content = extract_content_safely(raw_content)
+            if use_agent_ocr == "y":
+                dataframe = response.get("extracted_data", None)
+                content += "\n\n### Extracted Data:\n"+ str(dataframe) if dataframe else ""
             
             # Ensure we have some content
             if not content or content.strip() == "":

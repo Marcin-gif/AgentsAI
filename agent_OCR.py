@@ -1,22 +1,24 @@
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 import ollama
-import pytesseract
 from PIL import Image
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage
 import re
 import json
 import pandas as pd
-from state import AgentOCRState, ValidateJsonOutput
+from state import AgentOCRState, ValidateJsonOutput,CheckIsInvoice
 from langgraph.graph import StateGraph,END
+from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import MemorySaver
+from save_to_sql import insert_invoice_to_db
 
 def load_image(state: AgentOCRState) -> AgentOCRState:
     """
     Load the image from the provided path in the state.
     """
     try:
+        print("Load Image")
         image_path = state.get('image_path')
         if not image_path:
             raise ValueError("Brak ścieżki do obrazu w stanie.")
@@ -129,6 +131,55 @@ def load_image(state: AgentOCRState) -> AgentOCRState:
         print(f"Error loading image: {e}")
         return state
 
+def is_invoice(state: AgentOCRState) -> AgentOCRState:
+    """
+    Check if the extracted text contains invoice-related keywords.
+    """
+    print("Checking if the text is an invoice...")
+    try:
+        text = state.get('text','')
+        if not text:
+            print("No text extracted from the image.")
+            return state
+        prompt="""
+            Na podstawie tekstu z obrazu, określ, czy dany dokument to faktura.
+
+            W oparciu o analizę tekstu, odpowiedz "tak" lub "nie".
+
+            **tekst:**
+            {text}
+
+            Odpowiedź powinna być jednym słowem: "tak" lub "nie".
+        """
+        
+        prompt_template = ChatPromptTemplate.from_messages([
+            ("system",prompt),
+            HumanMessage(content="{text}")
+        ])
+        
+        llm = ChatOllama(model="deepseek-r1")
+        structured_llm_router = llm.with_structured_output(CheckIsInvoice)
+        
+        chain = prompt_template | structured_llm_router
+        
+        result = chain.invoke({"text": text})
+        print("Is invoice result:", result.invoice)
+        state['is_Invoice'] = result.invoice
+        return state
+        
+    except Exception as e:
+        print(f"Error checking if text is invoice: {e}")
+        return state
+
+def check_is_invoice(state: AgentOCRState) -> str:
+    """
+    Check if the extracted text is an invoice.
+    """
+    print("Checking if the text is an invoice...")
+    if state.get('is_Invoice') == 'tak':
+        return "generate_json_output"
+    else:
+        return "cannot_answer"
 
 def generate_json_output(state: AgentOCRState) -> AgentOCRState:
     """
@@ -136,62 +187,89 @@ def generate_json_output(state: AgentOCRState) -> AgentOCRState:
     model llama3:8b.
     """
     try:
+        print("Generating JSON output from extracted text...")
         system_prompt = """
-            Jesteś zaawansowanym asystentem do ekstrakcji danych z faktur.
-            Twoim zadaniem jest precyzyjne wyodrębnienie wszystkich dostępnych informacji z podanego tekstu faktury
-            i przekształcenie ich w ustrukturyzowany obiekt JSON, ściśle zgodny z poniższym schematem Pydantic.
+           Jesteś agentem AI, którego zadaniem jest wyodrębnienie danych z faktury i zwrócenie ich w ściśle określonym formacie JSON. 
 
-            **Kluczowe zasady ekstrakcji i mapowania:**
+### Struktura JSON musi zawierać pola:
 
-            1.  **Format JSON:** Zawsze zwracaj tylko kompletny i poprawny obiekt JSON.
-            2.  **Pełne mapowanie pól:**
-                * **Sprzedawca, Kupujący, Odbiorca:** Traktuj te podmioty jako obiekty typu `DaneFirmy`.
-                    * Dla każdego z nich (sprzedawca, kupujacy, odbiorca), mapuj dostępne pola takie jak:
-                        * `Nazwa` -> `nazwa`,
-                        * `Ulica` -> `ulica`,
-                        * `Kod pocztowy` -> `kod_pocztowy`,
-                        * `Miasto` -> `miasto`,
-                        * `NIP` -> `nip`,
-                        * `Email` -> `email`.
-                    * **Bardzo Ważne dla Odbiorcy:** Nawet jeśli dla "Odbiorca" w tekście podana jest tylko `Nazwa` ("Handel S.C."), model **MUSI** utworzyć pełny obiekt `odbiorca` typu `DaneFirmy`. Pola takie jak `adres`, `kod_pocztowy`, `miasto`, `nip`, `email`, które nie zostały znalezione w tekście dla odbiorcy, **muszą zostać ustawione na `null`**. Nie pomijaj obiektu `odbiorca` tylko dlatego, że jest niekompletny.
-                * **Faktura (obiekt `faktura`):** Zbierz wszystkie ogólne informacje o fakturze w zagnieżdżonym obiekcie `faktura`:
-                    * `Numer faktury` -> `numer_faktury`
-                    * `Data wystawienia` -> `data_wystawienia` (format `YYYY-MM-DD`)
-                    * `Data sprzedaży` -> `data_sprzedazy` (format `YYYY-MM-DD`)
-                    * `Sposób zapłaty` -> `sposob_zaplata`
-                    * `Termin zapłaty` -> `termin_zaplata` (format `YYYY-MM-DD`)
-                    * `P.O. Number` (jeśli wystąpi) -> `po_number` (w tym przypadku brak, więc `null`)
-                * **Pozycje Faktury (lista `pozycje`):** Dla każdej pozycji:
-                    * `LP X` -> `lp` (jako liczba całkowita, np. 1, 2)
-                    * `Nazwa towaru/usługi` -> `nazwa_towaru_uslugi`
-                    * `Rabaty` -> `rabat_procent` (jako float, np. 20.0 dla 20%)
-                    * `Ilość` -> `ilosc` (jako float)
-                    * `Jednostka miary` -> `jednostka_miary` (np. "szt.")
-                    * `Cena netto` -> `cena_netto_przed_rabatem` (jako float)
-                    * `Cena netto po rabacie` -> `cena_netto_po_rabacie` (jako float)
-                    * `Wartość netto` (dla pozycji) -> `wartosc_netto_pozycji` (jako float)
-                    * `Stawka VAT` -> `stawka_vat_procent` (jako float, np. 23.0 dla 23%)
-                    * `Wartość VAT` (dla pozycji) -> `kwota_vat_pozycji` (jako float)
-                    * `Wartość brutto` (dla pozycji) -> `wartosc_brutto_pozycji` (jako float)
-                * **Podsumowanie (obiekt `podsumowanie`):** Zbierz wszystkie ogólne sumy w zagnieżdżonym obiekcie `podsumowanie`:
-                    * `Wartość netto` -> `wartosc_netto_sumaryczna` (jako float)
-                    * `Stawka VAT` (ogólna) -> `stawka_vat_sumaryczna_procent` (jako float)
-                    * `Wartość VAT` (ogólna) -> `wartosc_vat_sumaryczna` (jako float)
-                    * `Wartość brutto` -> `wartosc_brutto_sumaryczna` (jako float)
-                    * `PLN` -> `waluta` (domyślnie "PLN")
-                * **Dodatkowe informacje (pola na najwyższym poziomie):**
-                    * `Zapłacono` -> `zaplacono` (jako float)
-                    * `Pozostało do zapłaty` -> `pozostalo_do_zaplaty` (jako float)
-                    * `Słownie` -> `slownie`
-                    * `Kwota do zapłaty` -> `kwota_do_zaplaty_koncowa` (jako float)
-                    * `Uwagi: proszę potwierdzić odbiór przesyłki` -> `uwagi` (tylko tekst "proszę potwierdzić odbiór przesyłki"). **NIE dołączaj innych wartości z sekcji "Dodatkowe informacje" do pola `uwagi`.**
+{{
+  "sprzedawca": {{
+    "nazwa": ...,
+    "ulica": ...,
+    "kod_pocztowy": ...,
+    "miasto": ...,
+    "nip": ...,
+    "email": ...       // jeśli brak email, wpisz null
+  }},
+  "kupujacy": {{
+    "nazwa": ...,
+    "ulica": ...,
+    "kod_pocztowy": ...,
+    "miasto": ...,
+    "nip": ...,
+    "email": ...       // jeśli brak email, wpisz null
+  }},
+  "odbiorca": {{
+    "nazwa": ...,
+    "ulica": ...,
+    "kod_pocztowy": ...,
+    "miasto": ...,
+    "nip": ...,
+    "email": ...       // jeśli brak email, wpisz null
+  }},
+  "faktura": {{
+    "numer_faktury": ...,
+    "data_wystawienia": ...,
+    "data_sprzedazy": ...,
+    "sposob_zaplata": ...,
+    "termin_zaplata": ...,
+    "po_number": ...
+  }},
+  "pozycje": [
+    {{
+      "lp": ...,
+      "nazwa_towaru_uslugi": ...,
+      "rabat_procent": ...,
+      "ilosc": ...,
+      "jednostka_miary": ...,
+      "cena_netto_przed_rabatem": ...,
+      "cena_netto_po_rabacie": ...,
+      "wartosc_netto_pozycji": ...,
+      "stawka_vat_procent": ...,
+      "kwota_vat_pozycji": ...,
+      "wartosc_brutto_pozycji": ...
+    }}
+  ],
+  "podsumowanie": {{
+    "wartosc_netto_sumaryczna": ...,
+    "stawka_vat_sumaryczna_procent": ...,
+    "wartosc_vat_sumaryczna": ...,
+    "wartosc_brutto_sumaryczna": ...,
+    "waluta": ...
+  }},
+  "zaplacono": ...,
+  "pozostalo_do_zaplaty": ...,
+  "slownie": ...,
+  "kwota_do_zaplaty_koncowa": ...,
+  "uwagi": ...
+}}
 
-            3.  **Typy Danych i Separatory:** Konwertuj wszystkie wartości liczbowe na typ `float` z kropką dziesiętną. Daty w formacie `YYYY-MM-DD`.
-            4.  **Brakujące Dane:** Jeśli dane pole nie występuje w tekście, ustaw jego wartość na `null`. Nie pomijaj całych obiektów/pól tylko dlatego, że są niekompletne, jeśli schemat tego wymaga.
-            5.  **Priorytet Sum:** W przypadku rozbieżności między sumami pozycji a sumami podanymi w sekcji "Podsumowanie", zawsze preferuj wartości z "Podsumowania".
+---
 
-            Input text:
-            {response}
+**WAŻNE:**
+
+- Każde pole musi być obecne. 
+- Jeśli w tekście faktury brakuje jakiejś wartości, wstaw `null`.
+- Pole `email` szukaj szczególnie w sekcjach sprzedawca, kupujący i odbiorca.
+- Jeśli nie znajdziesz adresu email, wpisz null.
+- Format JSON musi być poprawny i parsowalny.
+
+---
+
+Input faktury:
+{response}
+
 
         """
 
@@ -297,7 +375,7 @@ def validate_json_output(state: AgentOCRState) -> AgentOCRState:
     """
         Validate the extracted JSON data using the model llama3:8b.
     """
-    
+    print("Validating JSON output...")
     text = state.get('text')
     extracted_data = state.get('extracted_data')
     if not text or not extracted_data:
@@ -348,6 +426,7 @@ def check_validation_score(state: AgentOCRState) -> str:
     """
     Check the validation score and decide whether to continue or stop.
     """
+    print("Checking validation score...")
     if state.get('llm_validation_score', False):
         return "generate_dataFrame"
     elif state.get('validation_count', 0) >= 2:
@@ -360,6 +439,7 @@ def generate_dataFrame(state: AgentOCRState) -> AgentOCRState:
     """
     Generate the final answer based on the extracted data.
     """
+    print("Generating DataFrame from extracted data...")
     result = state.get('extracted_data', '')
     if not result:
         print("No extracted data available.")
@@ -382,72 +462,59 @@ def generate_dataFrame(state: AgentOCRState) -> AgentOCRState:
     for pattern in json_patterns:
         json_match = re.search(pattern, result, re.DOTALL)
         if json_match:
-            if pattern == r"\{.*\}":
-                receipt_data = json_match.group(0)  # Full match for direct JSON
-            else:
-                receipt_data = json_match.group(1)  # First capture group
-            
+            receipt_data = json_match.group(1) if pattern != r"\{.*\}" else json_match.group(0)
             try:
                 parsed_data = json.loads(receipt_data)
                 print(f"Successfully parsed JSON with pattern: {pattern}")
                 break
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error: {e}")
                 continue
-    
-    if parsed_data:
-        json_data = json.dumps(parsed_data, indent=2)
-        print("Parsed JSON data:")
-        print(json_data)
-        
-        # Convert to DataFrame and update state
-        receipt_dict = parsed_data
-        print("Receipt dictionary:")
-        print(receipt_dict)
-        
-        try:
-            items_df = pd.DataFrame(receipt_dict)
-            print("DataFrame:")
-            print(items_df)
-            
-            # Store serializable data
-            state['dataFrame'] = items_df.to_dict(orient='records')
-            state['dataFrame_info'] = {
-                'columns': items_df.columns.tolist(),
-                'shape': list(items_df.shape),  # Convert tuple to list
-                'dtypes': {col: str(dtype) for col, dtype in items_df.dtypes.items()}  # Convert dtypes to strings
-            }
-            
-        except Exception as e:
-            print(f"Error creating DataFrame: {e}")
-            # If direct conversion fails, try different approaches
-            if isinstance(receipt_dict, dict):
-                if 'items' in receipt_dict:
-                    items_df = pd.DataFrame(receipt_dict['items'])
-                elif 'pozycje' in receipt_dict:  # Polish word for 'items'
-                    items_df = pd.DataFrame(receipt_dict['pozycje'])
-                elif any(isinstance(v, list) for v in receipt_dict.values()):
-                    # Find the first list value and use it
-                    for key, value in receipt_dict.items():
-                        if isinstance(value, list):
-                            items_df = pd.DataFrame(value)
-                            break
-                else:
-                    # Convert single dict to single-row DataFrame
-                    items_df = pd.DataFrame([receipt_dict])
-                
-                print("DataFrame (alternative method):")
-                print(items_df)
-                
-                # Store serializable data
-                state['dataFrame'] = items_df.to_dict(orient='records')
-                state['dataFrame_info'] = {
-                    'columns': items_df.columns.tolist(),
-                    'shape': list(items_df.shape),  # Convert tuple to list
-                    'dtypes': {col: str(dtype) for col, dtype in items_df.dtypes.items()}  # Convert dtypes to strings
-                }
-    else:
-        print("No JSON data found in the response with any pattern.")
+
+    if not parsed_data:
+        print("No JSON data found.")
         return state
+
+    receipt_dict = parsed_data
+    print("Parsed receipt dictionary:")
+    print(json.dumps(receipt_dict, indent=2, ensure_ascii=False))
+
+    # Store each section in state
+    for section in ['sprzedawca', 'kupujacy', 'odbiorca', 'faktura', 'podsumowanie']:
+        state[f'db_{section}'] = receipt_dict.get(section, {})
+        print(state[f'db_{section}'])
+
+    # Handle items (pozycje)
+    try:
+        pozycje = receipt_dict.get("pozycje", [])
+        items_df = pd.DataFrame(pozycje)
+        print("Items DataFrame:")
+        print(items_df)
+
+        state['db_pozycje'] = items_df.to_dict(orient='records')
+        state['dataFrame_info'] = {
+            'columns': items_df.columns.tolist(),
+            'shape': list(items_df.shape),
+            'dtypes': {col: str(dtype) for col, dtype in items_df.dtypes.items()}
+        }
+
+    except Exception as e:
+        print(f"Error creating DataFrame for 'pozycje': {e}")
+        state['db_pozycje'] = []
+
+    # Store payment and remarks info
+    state['db_kwoty'] = {
+        'kwota_do_zaplaty_koncowa': receipt_dict.get('kwota_do_zaplaty_koncowa'),
+        'zaplacono': receipt_dict.get('zaplacono'),
+        'pozostalo_do_zaplaty': receipt_dict.get('pozostalo_do_zaplaty'),
+        'slownie': receipt_dict.get('slownie'),
+        'uwagi': receipt_dict.get('uwagi'),
+    }
+
+    print("\n--- FINAL STATE KEYS ---")
+    for key in state.keys():
+        if key.startswith("db_"):
+            print(f"{key}: {type(state[key])}")
 
     return state
 
@@ -456,6 +523,7 @@ def generate_answer(state: AgentOCRState) -> AgentOCRState:
     """
     Generate the final answer based on the extracted data.
     """
+    print("Generating final answer based on extracted data...")
     extracted_data = state.get('extracted_data', '')
     question = state.get('refined_question', '')
     if not extracted_data or not question:
@@ -496,6 +564,7 @@ def cannot_answer(state: AgentOCRState) -> AgentOCRState:
     """
     Handle the case where the agent cannot answer the question.
     """
+    print("Cannot answer the question.")
     print("Entering cannot answer")
     if "messages" not in state or state["messages"] is None:
         state["messages"] = []
@@ -510,12 +579,57 @@ def cannot_answer(state: AgentOCRState) -> AgentOCRState:
     )
     return state
 
+def save_to_db(state: AgentOCRState) -> AgentOCRState:
+    print("Saving invoice data to database...")
+    invoice_json = {
+        "sprzedawca": state.get("db_sprzedawca", {}),
+        "kupujacy": state.get("db_kupujacy", {}),
+        "odbiorca": state.get("db_odbiorca", {}),
+        "faktura": state.get("db_faktura", {}),
+        "podsumowanie": state.get("db_podsumowanie", {}),
+        "pozycje": state.get("db_pozycje", []),
+        "zaplacono": state['db_kwoty'].get('zaplacono', 0.0),
+        "pozostalo_do_zaplaty": state['db_kwoty'].get('pozostalo_do_zaplaty', 0.0),
+        "kwota_do_zaplaty_koncowa": state['db_kwoty'].get('kwota_do_zaplaty_koncowa', 0.0),
+        "slownie": state['db_kwoty'].get('slownie', ""),
+        "uwagi": state['db_kwoty'].get('uwagi', "")
+    }
+    insert_invoice_to_db(invoice_json)
+    print("Invoice data saved to DB.")
+    return state
+
+# def human_review(state: AgentOCRState):
+#     return interrupt({"pozycje": state.get("db_pozycje", []),"ask_to_save":True})
+
+# def apply_user_input(state: AgentOCRState):
+#     feedback = state.get("user_response", {})
+#     if "pozycje" in feedback:
+#         state["db_pozycje"] = feedback["pozycje"]
+#         print("Updated 'pozycje' in state with user input.")
+#     return state
+
+# def save_data(state: AgentOCRState):
+#     """
+#     Save the final state to a file or database.
+#     This is a placeholder function for saving the data.
+#     """
+#     if state.get("save_to_db"): # zapisujesz wszystkie pola db_*
+#         state["answer"] = "✅ Dane zostały zapisane do bazy danych."
+#     else:
+#         state["answer"] = "ℹ️ Dane nie zostały zapisane."
+
+#     return state
+
 memorySaver = MemorySaver()
 
 workflow = StateGraph(AgentOCRState)
 workflow.add_node(
     "load_image",
     load_image
+)
+workflow.add_node(
+    "is_invoice",
+    is_invoice
 )
 workflow.add_node(
     "generate_json_output",
@@ -538,8 +652,20 @@ workflow.add_node(
     "cannot_answer",
     cannot_answer
 )
+workflow.add_node("save_to_db", save_to_db)
+# workflow.add_node("human_review", human_review)
+# workflow.add_node("apply_user_input", apply_user_input)
+# workflow.add_node("save_data", save_data)
 
-workflow.add_edge("load_image", "generate_json_output") 
+workflow.add_edge("load_image", "is_invoice") 
+workflow.add_conditional_edges(
+    "is_invoice",
+    check_is_invoice,
+    {
+        "generate_json_output": "generate_json_output",
+        "cannot_answer": "cannot_answer"
+    }
+)
 workflow.add_edge("generate_json_output", "validate_json_output")
 workflow.add_conditional_edges(
     "validate_json_output",
@@ -551,19 +677,14 @@ workflow.add_conditional_edges(
     }
 )
 workflow.add_edge("generate_dataFrame", "generate_answer")
-workflow.add_edge("generate_answer", END)
+workflow.add_edge("generate_answer", "save_to_db")
+workflow.add_edge("save_to_db",END)
+# workflow.add_edge("generate_answer", "human_review")
+# workflow.add_edge("human_review", "apply_user_input")
+# workflow.add_edge("apply_user_input", "save_data")
+# workflow.add_edge("save_data", END)
 workflow.add_edge("cannot_answer", END)
 workflow.set_entry_point("load_image")
 graph_agent_ocr = workflow.compile(checkpointer=memorySaver)
 graph_agent_ocr.get_graph().draw_mermaid_png(output_file_path="AgentOCRGraph.png")
 
-result = graph_agent_ocr.invoke(
-    {
-        "image_path": "invoice.jpg",
-        "refined_question": HumanMessage(content="Napisz mi wszystko o towarach?"),
-        "messages": []
-    },
-    config={"configurable": {"thread_id": 1}}
-)
-
-print("Final Result: ", result.get("answer", "No answer generated."))

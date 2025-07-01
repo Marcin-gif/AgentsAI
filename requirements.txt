@@ -3,6 +3,9 @@ langchain
 langchain-core
 langgraph
 langchain-ollama
+langchain-openai
+langchain-community
+sentence-transformers
 ollama
 pytesseract
 pillow
